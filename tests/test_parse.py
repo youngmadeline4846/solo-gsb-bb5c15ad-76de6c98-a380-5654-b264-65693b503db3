@@ -171,3 +171,236 @@ def test_batch_invalid_character():
 def test_missing_data_field():
     resp = client.post("/parse", json={})
     assert resp.status_code == 422
+
+
+# ------------------------------------------------------- GS1 Digital Link URIs
+
+DL = "https://id.example.com"  # 22 chars; path starts at offset 22
+
+
+def test_digital_link_path_and_query_elements_in_order():
+    resp = parse(f"{DL}/01/{GTIN_OK}/10/ABC123?17=250131&21=SN0001")
+    assert resp.status_code == 200
+    elements = resp.json()["elements"]
+    assert [e["ai"] for e in elements] == ["01", "10", "17", "21"]
+    assert [e["value"] for e in elements] == [GTIN_OK, "ABC123", "250131", "SN0001"]
+    assert [e["offset"] for e in elements] == [23, 41, 51, 61]
+    assert [e["name"] for e in elements] == ["GTIN", "BATCH/LOT", "EXPIRY", "SERIAL"]
+
+
+def test_digital_link_path_elements_come_before_query_regardless_of_ai():
+    resp = parse(f"{DL}/01/{GTIN_OK}/21/SN0001?10=ABC123&17=250131")
+    assert resp.status_code == 200
+    assert [e["ai"] for e in resp.json()["elements"]] == ["01", "21", "10", "17"]
+
+
+def test_digital_link_http_scheme():
+    resp = parse(f"http://example.com/01/{GTIN_OK}")
+    assert resp.status_code == 200
+    element = resp.json()["elements"][0]
+    assert element["ai"] == "01"
+    assert element["offset"] == 19  # after "http://example.com/"
+
+
+def test_digital_link_query_only():
+    resp = parse(f"{DL}?01={GTIN_OK}&17=250131")
+    assert resp.status_code == 200
+    elements = resp.json()["elements"]
+    assert [e["ai"] for e in elements] == ["01", "17"]
+    assert [e["offset"] for e in elements] == [23, 41]
+
+
+def test_digital_link_non_ai_query_params_ignored():
+    resp = parse(f"{DL}/01/{GTIN_OK}?linkType=gs1:default&17=250131")
+    assert resp.status_code == 200
+    elements = resp.json()["elements"]
+    assert [e["ai"] for e in elements] == ["01", "17"]
+    assert [e["offset"] for e in elements] == [23, 62]
+
+
+def test_digital_link_percent_decoding():
+    resp = parse(f"{DL}/10/ABC%44%45%46/21/SN%2D001")
+    assert resp.status_code == 200
+    assert [e["value"] for e in resp.json()["elements"]] == ["ABCDEF", "SN-001"]
+
+
+def test_digital_link_plus_sign_kept_literal():
+    resp = parse(f"{DL}/21/SN+001")
+    assert resp.status_code == 200
+    assert resp.json()["elements"][0]["value"] == "SN+001"
+
+
+def test_digital_link_fragment_ignored():
+    resp = parse(f"{DL}/01/{GTIN_OK}#section")
+    assert resp.status_code == 200
+    assert [e["ai"] for e in resp.json()["elements"]] == ["01"]
+
+
+def test_element_string_containing_url_like_value_still_parses():
+    resp = parse("10http://example.com")
+    assert resp.status_code == 200
+    assert resp.json()["elements"][0]["value"] == "http://example.com"
+
+
+# -------------------------------------------------- digital link URI errors
+
+def test_digital_link_unpaired_path_segment():
+    resp = parse(f"{DL}/01/{GTIN_OK}/21")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "INVALID_URI"
+    assert detail["offset"] == 41  # the unpaired '21' segment
+    assert detail["found"] == "21"
+
+
+def test_digital_link_unknown_ai_in_path():
+    resp = parse(f"{DL}/99/ABC")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "UNSUPPORTED_AI"
+    assert detail["offset"] == 23
+    assert detail["found"] == "99"
+
+
+def test_digital_link_unknown_ai_in_query():
+    resp = parse(f"{DL}/01/{GTIN_OK}?99=ABC")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "UNSUPPORTED_AI"
+    assert detail["offset"] == 41
+    assert detail["found"] == "99"
+
+
+def test_digital_link_non_numeric_ai_in_path():
+    resp = parse(f"{DL}/AB/CD")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "INVALID_AI"
+    assert detail["offset"] == 23
+    assert detail["found"] == "AB"
+
+
+def test_digital_link_duplicate_ai_in_path():
+    resp = parse(f"{DL}/01/{GTIN_OK}/01/{GTIN_OK}")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "DUPLICATE_AI"
+    assert detail["offset"] == 41  # the second '01'
+    assert detail["found"] == "01"
+
+
+def test_digital_link_duplicate_ai_in_query():
+    resp = parse(f"{DL}?10=A&10=B")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "DUPLICATE_AI"
+    assert detail["offset"] == 28  # the second '10'
+    assert detail["found"] == "10"
+
+
+def test_digital_link_ai_in_both_path_and_query():
+    resp = parse(f"{DL}/01/{GTIN_OK}?01={GTIN_OK}")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "DUPLICATE_AI"
+    assert detail["offset"] == 41  # the query '01'
+    assert "both" in detail["message"]
+
+
+def test_digital_link_check_digit_validation_reused():
+    resp = parse(f"{DL}/01/09501101530004")  # last digit should be 3
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "INVALID_CHECK_DIGIT"
+    assert detail["offset"] == 39  # byte offset of the check digit in the URI
+    assert detail["found"] == "4"
+
+
+def test_digital_link_date_validation_reused():
+    resp = parse(f"{DL}/17/251331")  # month 13
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "INVALID_DATE"
+    assert detail["offset"] == 28  # byte offset of the month in the URI
+
+
+def test_digital_link_fixed_field_too_short():
+    resp = parse(f"{DL}/01/0950")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "FIELD_TOO_SHORT"
+    assert detail["offset"] == 30  # end of the value in the URI
+
+
+def test_digital_link_variable_field_too_long():
+    resp = parse(f"{DL}/10/" + "A" * 21)
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "FIELD_TOO_LONG"
+    assert detail["offset"] == 46  # the 21st character
+
+
+def test_digital_link_empty_query_value():
+    resp = parse(f"{DL}/01/{GTIN_OK}?10=")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "FIELD_EMPTY"
+    assert detail["offset"] == 44
+
+
+def test_digital_link_invalid_character_offset_maps_to_original_uri():
+    resp = parse(f"{DL}/10/AB%23CD")  # %23 decodes to '#'
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "INVALID_CHARACTER"
+    assert detail["found"] == "#"
+    assert detail["offset"] == 28  # byte offset of '%' in the original URI
+
+
+def test_digital_link_utf8_percent_decoding_before_charset_check():
+    resp = parse(f"{DL}/21/SN%C3%A9")  # %C3%A9 decodes to 'é'
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "INVALID_CHARACTER"
+    assert detail["found"] == "é"
+    assert detail["offset"] == 28  # byte offset of the '%C3' sequence
+
+
+def test_digital_link_invalid_percent_encoding():
+    resp = parse(f"{DL}/10/AB%2")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "INVALID_PERCENT_ENCODING"
+    assert detail["offset"] == 28
+    assert detail["found"] == "%2"
+
+
+def test_digital_link_invalid_percent_encoding_hex():
+    resp = parse(f"{DL}/10/AB%ZZ")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "INVALID_PERCENT_ENCODING"
+    assert detail["offset"] == 28
+    assert detail["found"] == "%ZZ"
+
+
+def test_digital_link_invalid_utf8_percent_encoding():
+    resp = parse(f"{DL}/10/%FF")
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "INVALID_PERCENT_ENCODING"
+    assert detail["offset"] == 26
+
+
+def test_digital_link_without_elements():
+    resp = parse(DL)
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "EMPTY_INPUT"
+    assert detail["offset"] == 0
+
+
+def test_digital_link_bare_path_without_elements():
+    resp = parse(f"{DL}/")
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["error"] == "EMPTY_INPUT"

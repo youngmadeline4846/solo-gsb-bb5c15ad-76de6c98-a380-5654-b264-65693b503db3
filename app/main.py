@@ -1,4 +1,4 @@
-"""FastAPI application exposing the GS1 element-string parser."""
+"""FastAPI application exposing the GS1 element-string / Digital Link parser."""
 
 from __future__ import annotations
 
@@ -9,11 +9,12 @@ from .gs1 import GS1ParseError, parse
 
 app = FastAPI(
     title="GS1 Element String Parser",
-    version="1.0.0",
+    version="1.1.0",
     description=(
-        "Parses raw GS1 scan strings (FNC1 / ASCII 29 separated) into "
-        "structured, ordered AI elements. Supports AI 01 (GTIN), 10 (batch/lot), "
-        "17 (expiry date) and 21 (serial number)."
+        "Parses raw GS1 scan strings (FNC1 / ASCII 29 separated) or GS1 "
+        "Digital Link URIs (http:// / https://) into structured, ordered AI "
+        "elements. Supports AI 01 (GTIN), 10 (batch/lot), 17 (expiry date) "
+        "and 21 (serial number)."
     ),
 )
 
@@ -21,12 +22,17 @@ app = FastAPI(
 class ParseRequest(BaseModel):
     data: str = Field(
         ...,
-        title="Raw scan string",
+        title="Raw scan string or GS1 Digital Link URI",
         description=(
-            "Raw GS1 element string as scanned. Variable-length fields are "
-            "separated by ASCII 29, encoded in JSON as \\u001d."
+            "Raw GS1 element string as scanned (variable-length fields are "
+            "separated by ASCII 29, encoded in JSON as \\u001d) or a GS1 "
+            "Digital Link URI carrying AI/value pairs in the path and AI "
+            "query parameters."
         ),
-        examples=["01095011015300031725013110ABC123\u001d21SN0001"],
+        examples=[
+            "01095011015300031725013110ABC123\u001d21SN0001",
+            "https://id.example.com/01/09501101530003/10/ABC123?17=250131&21=SN0001",
+        ],
     )
 
 
